@@ -1,24 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
-import { applyTaskClarification, emptyTask, getTaskClarification, parseTaskInstructions, USERS } from "./taskParser";
+import { blobToBase64, understandTask } from "./aiTaskUnderstanding";
+import type { AiUnderstandingRequest } from "./aiTaskUnderstanding";
+import { emptyTask, getTaskClarification, parseTaskInstructions, USERS } from "./taskParser";
 import type { ParsedTask, Recurrence, User } from "./taskParser";
 import { validateTaskForExecution, verifyTaskForm } from "./taskFormExecution";
 
-type SpeechRecognitionResultEvent = Event & { results: SpeechRecognitionResultList };
-type SpeechRecognitionErrorEvent = Event & { error: string };
-interface SpeechRecognitionInstance extends EventTarget {
-  lang: string;
+interface CreatedTask extends ParsedTask {
+  id: number;
+}
+
+interface SpeechRecognitionLike {
+  continuous: boolean;
   interimResults: boolean;
-  maxAlternatives: number;
-  onresult: ((event: SpeechRecognitionResultEvent) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  lang: string;
+  onerror: ((event: Event) => void) | null;
   onend: (() => void) | null;
-  start(): void;
-  stop(): void;
+  onspeechend: (() => void) | null;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  start: () => void;
+  stop: () => void;
 }
+
 interface SpeechRecognitionConstructor {
-  new (): SpeechRecognitionInstance;
+  new (): SpeechRecognitionLike;
 }
+
 declare global {
   interface Window {
     SpeechRecognition?: SpeechRecognitionConstructor;
@@ -26,15 +33,26 @@ declare global {
   }
 }
 
-interface CreatedTask extends ParsedTask {
-  id: number;
+const preferredAudioTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
+const maximumRecordingBytes = 9 * 1024 * 1024;
+const maximumRecordingMilliseconds = 45_000;
+const speechSilenceMilliseconds = 1_200;
+
+function chooseAudioType(): string {
+  if (typeof MediaRecorder.isTypeSupported !== "function") return "";
+  return preferredAudioTypes.find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 }
 
-const fieldLabels: Record<string, string> = {
-  notAllowed: "Microphone permission was denied. Allow microphone access in your browser settings, or type your instruction instead.",
-  noSpeech: "No speech was detected. Try again or type your instruction.",
-  network: "Speech recognition could not connect. Check your connection, or type your instruction.",
-};
+function microphoneErrorMessage(error: unknown): string {
+  if (error instanceof DOMException && error.name === "NotAllowedError") {
+    return "Microphone access was denied. Allow it in your browser settings, or type your instruction.";
+  }
+  if (error instanceof DOMException && error.name === "NotFoundError") {
+    return "No microphone was found. Connect a microphone or type your instruction.";
+  }
+  if (error instanceof Error) return `Could not start recording: ${error.message}`;
+  return "Could not start recording. You can type your instruction instead.";
+}
 
 function UserPicker({
   label,
@@ -122,19 +140,34 @@ export default function App() {
   const [form, setForm] = useState<ParsedTask>(emptyTask);
   const [tasks, setTasks] = useState<CreatedTask[]>([]);
   const [status, setStatus] = useState<{ kind: "success" | "error" | "info"; message: string } | null>(null);
-  const [isListening, setIsListening] = useState(false);
-  const [recognition, setRecognition] = useState<SpeechRecognitionInstance | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [googleConsent, setGoogleConsent] = useState(false);
   const [pendingVerification, setPendingVerification] = useState<{ task: ParsedTask; ambiguities: string[] } | null>(null);
   const [clarificationContext, setClarificationContext] = useState<{ task: ParsedTask; ambiguities: string[] } | null>(null);
   const [recognitionLanguage, setRecognitionLanguage] = useState("en-IN");
   const formRef = useRef<HTMLDivElement>(null);
-  const finalTranscriptRef = useRef("");
-  const processedTranscriptRef = useRef("");
-  const processSpeechOnEndRef = useRef(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const recognizedTranscriptRef = useRef("");
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const processRecordingOnStopRef = useRef(false);
+  const recordingTimeoutRef = useRef<number | null>(null);
+  const speechSilenceTimeoutRef = useRef<number | null>(null);
+  const recordingAttemptRef = useRef(0);
   const submitLockRef = useRef(false);
   const processingLockRef = useRef(false);
+
+  useEffect(() => () => {
+    processRecordingOnStopRef.current = false;
+    if (recordingTimeoutRef.current !== null) window.clearTimeout(recordingTimeoutRef.current);
+    if (speechSilenceTimeoutRef.current !== null) window.clearTimeout(speechSilenceTimeoutRef.current);
+    speechRecognitionRef.current?.stop();
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   function openComposer() {
     submitLockRef.current = false;
@@ -143,46 +176,109 @@ export default function App() {
   }
 
   function closeComposer() {
-    processSpeechOnEndRef.current = false;
-    recognition?.stop();
-    setIsListening(false);
+    recordingAttemptRef.current += 1;
+    processRecordingOnStopRef.current = false;
+    if (recordingTimeoutRef.current !== null) window.clearTimeout(recordingTimeoutRef.current);
+    if (speechSilenceTimeoutRef.current !== null) window.clearTimeout(speechSilenceTimeoutRef.current);
+    speechRecognitionRef.current?.stop();
+    speechRecognitionRef.current = null;
+    recognizedTranscriptRef.current = "";
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    setIsRecording(false);
     setIsOpen(false);
   }
 
-  async function processInstructions(transcript = instructions) {
-    const text = transcript.trim();
-    if (!text) {
-      setStatus({ kind: "error", message: "Type or dictate an instruction first." });
+  function applyAiResult(transcript: string, result: Awaited<ReturnType<typeof understandTask>>) {
+    setInstructions(transcript);
+
+    // If Gemini says this is not a task-related command at all, do not change the form.
+    if (!result.isTaskCommand && !clarificationContext) {
+      setPendingVerification(null);
+      setStatus({ kind: "info", message: "I couldn't identify a task-related instruction. Please describe what you want to create or update." });
       return;
     }
+
+    // The server already merged Gemini's changes onto the currentTask baseline.
+    // We do an additional client-side safety merge to ensure no field accidentally
+    // becomes undefined (e.g. if an old cached form state is stale).
+    setForm((current) => {
+      const merged = { ...current, ...result.task };
+      // Keep existing non-empty values if server returned empty for a field
+      // (defence against edge-case schema mismatch).
+      return {
+        assignee:  result.task.assignee  || current.assignee,
+        date:      result.task.date      || current.date,
+        time:      result.task.time      || current.time,
+        subject:   result.task.subject   || current.subject,
+        reviewer:  result.task.reviewer  !== undefined ? result.task.reviewer : current.reviewer,
+        recurring: merged.recurring,
+        frequency: merged.frequency,
+        startTask: merged.startTask,
+      };
+    });
+
+    // Surface Gemini's clarification question if provided.
+    if (result.needsClarification && result.clarificationQuestion) {
+      setPendingVerification({ task: result.task, ambiguities: result.ambiguities });
+      setStatus({ kind: "info", message: result.clarificationQuestion });
+      return;
+    }
+
+    setPendingVerification({ task: result.task, ambiguities: result.ambiguities });
+  }
+
+  async function processWithAi(request: AiUnderstandingRequest, hasLocalFallback = false) {
     if (processingLockRef.current) return;
     processingLockRef.current = true;
     setIsProcessing(true);
-    setStatus({ kind: "info", message: "Parsing the instruction and preparing task fields…" });
+    setStatus({
+      kind: "info",
+      message: request.audioBase64
+        ? "Sending your recording to Gemini for transcription and task understanding…"
+        : "Sending your instruction to Gemini for task understanding…",
+    });
     try {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-      const freshParse = parseTaskInstructions(text);
-      if (!freshParse.isTaskCommand && !clarificationContext) {
-        setStatus({ kind: "info", message: "That doesn't sound like a task-creation instruction. Describe a task to fill in the form." });
-        return;
-      }
-
-      const result = clarificationContext && !freshParse.isTaskCommand
-        ? applyTaskClarification(clarificationContext.task, clarificationContext.ambiguities, text)
-        : freshParse;
-      const { task, ambiguities } = result;
-      setForm(task);
-      setPendingVerification({ task, ambiguities });
+      const response = await understandTask(request);
+      applyAiResult(response.transcript, response);
     } catch (error) {
-      setPendingVerification(null);
+      if (!hasLocalFallback) setPendingVerification(null);
+      const message = error instanceof Error ? error.message : "AI task understanding failed. Try again or edit the fields manually.";
       setStatus({
-        kind: "error",
-        message: error instanceof Error ? `Could not validate parsed task details: ${error.message}` : "Could not validate parsed task details.",
+        kind: hasLocalFallback ? "info" : "error",
+        message: hasLocalFallback
+          ? `Gemini could not complete the request. I filled in the task details I could recognize; please review them. ${message}`
+          : message,
       });
     } finally {
       processingLockRef.current = false;
       setIsProcessing(false);
     }
+  }
+
+  async function processInstructions(transcript = instructions) {
+    const text = transcript.trim();
+    if (!text) {
+      setStatus({ kind: "error", message: "Type or record an instruction first." });
+      return;
+    }
+    if (!googleConsent) {
+      setStatus({ kind: "info", message: "Please confirm the Google Gemini data-use notice before sending this instruction." });
+      return;
+    }
+    // Local parser is only a quick fallback — it does NOT overwrite the form.
+    // We capture whether it found something useful for the hasLocalFallback flag,
+    // but we always send the full current form as context to Gemini.
+    const localResult = parseTaskInstructions(text);
+    const hasLocalFallback = localResult.isTaskCommand;
+    // Do NOT call setForm(localResult.task) here — it would clear existing fields.
+    // Gemini will return a properly merged task instead.
+    await processWithAi({
+      text,
+      language: recognitionLanguage,
+      currentTask: form,
+      clarificationContext: clarificationContext ?? undefined,
+    }, hasLocalFallback);
   }
 
   useEffect(() => {
@@ -213,59 +309,182 @@ export default function App() {
     setPendingVerification(null);
   }, [form, pendingVerification]);
 
-  function toggleListening() {
-    if (isListening) {
-      recognition?.stop();
-      setIsListening(false);
+  async function processRecording(blob: Blob) {
+    if (!blob.size) {
+      setStatus({ kind: "error", message: "No audio was recorded. Try again or type your instruction." });
       return;
     }
-    const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setStatus({ kind: "error", message: "Voice input isn't supported in this browser. You can still type instructions above." });
+    if (blob.size > maximumRecordingBytes) {
+      setStatus({ kind: "error", message: "That recording is too large. Keep voice instructions under 45 seconds and try again." });
       return;
     }
-    const nextRecognition = new SpeechRecognition();
-    finalTranscriptRef.current = "";
-    processedTranscriptRef.current = "";
-    processSpeechOnEndRef.current = true;
-    nextRecognition.lang = recognitionLanguage;
-    nextRecognition.interimResults = true;
-    nextRecognition.maxAlternatives = 1;
-    nextRecognition.onresult = (event) => {
-      const results = Array.from(event.results);
-      finalTranscriptRef.current = results.filter((result) => result.isFinal).map((result) => result[0].transcript).join(" ").trim();
-      const transcript = results.map((result) => result[0].transcript).join(" ").trim();
-      setInstructions(transcript);
-      setStatus({ kind: "info", message: "Speech recognized. The completed transcript will be processed automatically." });
-    };
-    nextRecognition.onerror = (event) => {
-      processSpeechOnEndRef.current = false;
-      setIsListening(false);
-      setRecognition(null);
-      setStatus({ kind: "error", message: fieldLabels[event.error] ?? `Voice input failed (${event.error}). You can type your instruction instead.` });
-    };
-    nextRecognition.onend = () => {
-      setIsListening(false);
-      setRecognition(null);
-      const transcript = finalTranscriptRef.current;
-      if (processSpeechOnEndRef.current && transcript && transcript !== processedTranscriptRef.current) {
-        processedTranscriptRef.current = transcript;
-        processInstructions(transcript);
-      } else if (processSpeechOnEndRef.current && !transcript) {
-        setStatus({ kind: "error", message: "No complete speech was recognized. Try again or type your instruction." });
-      }
-      processSpeechOnEndRef.current = false;
-    };
-    setRecognition(nextRecognition);
-    setIsListening(true);
-    setStatus({ kind: "info", message: "Listening… speak your task instruction." });
+    if (!googleConsent) {
+      setStatus({ kind: "info", message: "Please confirm the Google Gemini data-use notice before recording and sending audio." });
+      return;
+    }
     try {
-      nextRecognition.start();
+      const audioBase64 = await blobToBase64(blob);
+      await processWithAi({
+        audioBase64,
+        mimeType: blob.type || "audio/webm",
+        language: recognitionLanguage,
+        currentTask: form,
+        clarificationContext: clarificationContext ?? undefined,
+      });
     } catch (error) {
-      processSpeechOnEndRef.current = false;
-      setRecognition(null);
-      setIsListening(false);
-      setStatus({ kind: "error", message: error instanceof Error ? `Could not start microphone: ${error.message}` : "Could not start microphone. You can type your instruction instead." });
+      setStatus({ kind: "error", message: error instanceof Error ? error.message : "Could not process the recording. Try again or type your instruction." });
+    }
+  }
+
+  function stopRecording() {
+    processRecordingOnStopRef.current = true;
+    if (recordingTimeoutRef.current !== null) window.clearTimeout(recordingTimeoutRef.current);
+    if (speechSilenceTimeoutRef.current !== null) window.clearTimeout(speechSilenceTimeoutRef.current);
+    setStatus({ kind: "info", message: "Finishing transcription and processing your instruction…" });
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    setIsRecording(false);
+  }
+
+  async function toggleRecording() {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+    if (!googleConsent) {
+      setStatus({ kind: "info", message: "Please confirm the Google Gemini data-use notice before recording." });
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setStatus({ kind: "error", message: "Audio recording is not supported in this browser. You can type the instruction instead." });
+      return;
+    }
+    try {
+      const attempt = ++recordingAttemptRef.current;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      if (attempt !== recordingAttemptRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current = stream;
+      const mimeType = chooseAudioType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const recognitionConstructor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+      const recognition = recognitionConstructor ? new recognitionConstructor() : null;
+      recorderRef.current = recorder;
+      speechRecognitionRef.current = recognition;
+      audioChunksRef.current = [];
+      recognizedTranscriptRef.current = "";
+      let recognitionStarted = false;
+      setInstructions("");
+      processRecordingOnStopRef.current = true;
+      if (recognition) {
+        recognition.lang = recognitionLanguage;
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.onresult = (event) => {
+          const transcript = Array.from(event.results, (result) => result[0]?.transcript ?? "").join("").trim();
+          recognizedTranscriptRef.current = transcript;
+          setInstructions(transcript);
+          if (speechSilenceTimeoutRef.current !== null) window.clearTimeout(speechSilenceTimeoutRef.current);
+          speechSilenceTimeoutRef.current = window.setTimeout(() => {
+            if (recorderRef.current?.state === "recording" && recognizedTranscriptRef.current) stopRecording();
+          }, speechSilenceMilliseconds);
+        };
+        recognition.onspeechend = () => {
+          if (recorderRef.current?.state === "recording" && recognizedTranscriptRef.current) stopRecording();
+        };
+        recognition.onend = () => {
+          if (recorderRef.current?.state === "recording" && speechRecognitionRef.current === recognition) {
+            speechRecognitionRef.current = null;
+          }
+        };
+        recognition.onerror = () => {
+          setStatus({ kind: "info", message: "Live transcription stopped; the captured instruction will still be processed when you stop." });
+        };
+      }
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) audioChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        processRecordingOnStopRef.current = false;
+        speechRecognitionRef.current?.stop();
+        speechRecognitionRef.current = null;
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        recorderRef.current = null;
+        setIsRecording(false);
+        setStatus({ kind: "error", message: "Audio recording failed. Check microphone access or type your instruction." });
+      };
+      recorder.onstop = () => {
+        if (recordingTimeoutRef.current !== null) window.clearTimeout(recordingTimeoutRef.current);
+        recorderRef.current = null;
+        setIsRecording(false);
+        const shouldProcess = processRecordingOnStopRef.current;
+        processRecordingOnStopRef.current = false;
+        const audio = new Blob(audioChunksRef.current, { type: recorder.mimeType || mimeType || "audio/webm" });
+        audioChunksRef.current = [];
+        const releaseStream = () => {
+          stream.getTracks().forEach((track) => track.stop());
+          if (streamRef.current === stream) streamRef.current = null;
+        };
+        if (!shouldProcess) {
+          releaseStream();
+          return;
+        }
+
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          if (recordingTimeoutRef.current !== null) window.clearTimeout(recordingTimeoutRef.current);
+          releaseStream();
+          const transcript = recognizedTranscriptRef.current.trim();
+          recognizedTranscriptRef.current = "";
+          speechRecognitionRef.current = null;
+          if (attempt !== recordingAttemptRef.current) return;
+          if (transcript) void processInstructions(transcript);
+          else void processRecording(audio);
+        };
+        if (recognition && recognitionStarted && speechRecognitionRef.current === recognition) {
+          recognition.onend = finish;
+          recordingTimeoutRef.current = window.setTimeout(finish, 600);
+          try {
+            recognition.stop();
+          } catch {
+            finish();
+          }
+        } else {
+          finish();
+        }
+      };
+      recorder.start();
+      if (recognition) {
+        try {
+          recognition.start();
+          recognitionStarted = true;
+        } catch {
+          speechRecognitionRef.current = null;
+        }
+      }
+      setIsRecording(true);
+      setStatus({
+        kind: "info",
+        message: recognition
+          ? "Recording… your words will appear here. Pause when you’re done to process automatically."
+          : "Recording… speak your instruction, then press stop to send it to Gemini.",
+      });
+      recordingTimeoutRef.current = window.setTimeout(() => {
+        if (recorder.state === "recording") {
+          stopRecording();
+        }
+      }, maximumRecordingMilliseconds);
+    } catch (error) {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setIsRecording(false);
+      setStatus({ kind: "error", message: microphoneErrorMessage(error) });
     }
   }
 
@@ -358,7 +577,7 @@ export default function App() {
         ) : (
           <div className="empty-state"><div className="empty-icon">✳</div><h3>Ready when you are</h3><p>Open the task form, describe a task, then review the verified fields before submitting manually.</p><button className="text-button" type="button" onClick={openComposer}>Try a voice or text command <span>→</span></button></div>
         )}
-        <p className="privacy-note"><span>✦</span> Local deterministic parsing · no API key; submission always requires your click.</p>
+        <p className="privacy-note"><span>✦</span> Gemini AI understands voice and text commands; task submission always requires your click.</p>
       </section>
 
       {isOpen && (
@@ -367,19 +586,23 @@ export default function App() {
             <header className="composer-header"><div><span className="composer-icon">✦</span><div><h2 id="composer-title">Task details</h2><p>Say it or type it — we’ll fill in the form for review.</p></div></div><button className="close-button" type="button" aria-label="Close" onClick={closeComposer}>×</button></header>
             <div className="composer-body">
               <label className="instruction-label" htmlFor="instructions">Your instruction</label>
-              <div className="instruction-box"><textarea id="instructions" value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="e.g. Create a task for Rahul tomorrow at 3 PM. The subject is Review the project…" rows={3} /><button className={`mic-button ${isListening ? "listening" : ""}`} type="button" aria-label={isListening ? "Stop listening" : "Start voice input"} onClick={toggleListening}><span>{isListening ? "■" : "⌁"}</span></button></div>
+              <div className="instruction-box"><textarea id="instructions" value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="e.g. Create a task for Rahul tomorrow at 3 PM. The subject is Review the project…" rows={3} /><button className={`mic-button ${isRecording ? "listening" : ""}`} type="button" aria-label={isRecording ? "Stop recording" : "Record voice instruction"} onClick={() => void toggleRecording()} disabled={isProcessing}><span>{isRecording ? "■" : "⌁"}</span></button></div>
               <div className="instruction-actions">
-                <label className="language-picker">Speech language
-                  <select value={recognitionLanguage} onChange={(event) => setRecognitionLanguage(event.target.value)} disabled={isListening}>
-                    <option value="en-IN">English (India)</option><option value="en-US">English (US)</option>
+                <label className="language-picker">Input language
+                  <select value={recognitionLanguage} onChange={(event) => setRecognitionLanguage(event.target.value)} disabled={isRecording || isProcessing}>
+                    <option value="en-IN">English (India)</option><option value="en-US">English (US)</option><option value="hi-IN">Hindi (India)</option>
                   </select>
                 </label>
-                <span className="voice-hint">{isListening ? "Listening now…" : "Voice input works in supported browsers; typed input is always available."}</span>
-                <button className="process-button" type="button" onClick={() => void processInstructions()} disabled={isProcessing || isListening}>
+                <span className="voice-hint">{isRecording ? "Pause when you’re done to process automatically, or press stop." : "Record up to 45 seconds or type a command."}</span>
+                <button className="process-button" type="button" onClick={() => void processInstructions()} disabled={isProcessing || isRecording}>
                   {isProcessing && <span className="spinner" aria-hidden="true" />} {isProcessing ? "Processing…" : "Process instructions"} <span aria-hidden="true">→</span>
                 </button>
               </div>
-              <p className="speech-privacy-note">Voice transcription uses your browser’s speech service; task understanding runs locally in this app.</p>
+              <label className="ai-consent">
+                <input type="checkbox" checked={googleConsent} onChange={(event) => setGoogleConsent(event.target.checked)} disabled={isRecording || isProcessing} />
+                <span>I agree to send my instruction to Google Gemini for task understanding. For voice, my browser’s speech-recognition service may also process microphone audio for live transcription; if unavailable, the recording is sent to Gemini. On the free tier, Google may use submitted content to improve its products. <a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noreferrer">Free-tier terms</a></span>
+              </label>
+              <p className="speech-privacy-note">Live speech recognition may process microphone audio through your browser’s speech service; the recognized text is sent to Gemini for task understanding. If live recognition is unavailable, the recording is sent to Gemini for transcription. This app does not save audio, and your Gemini API key stays on the server.</p>
               {status && <div className={`status-banner composer-status ${status.kind}`} role="status">{status.message}</div>}
 
               <div className="form-divider"><span>REVIEW TASK DETAILS</span></div>

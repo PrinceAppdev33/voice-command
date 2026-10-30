@@ -4,9 +4,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k -n api,web \"node --env-file-if-exists=.env server.mjs\" \"vite\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "start": "node --env-file-if-exists=.env server.mjs",
     "test": "node --test"
   },
   "dependencies": {
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1"
+    "@types/react-dom": "^18.3.1",
+    "concurrently": "^9.2.1"
   }
 }

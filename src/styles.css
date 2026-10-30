@@ -93,10 +93,14 @@ input:focus, textarea:focus, select:focus { border-color: #968bed !important; bo
 .instruction-box textarea::placeholder, input::placeholder { color: #aaacb9; }
 .mic-button { position: absolute; right: 9px; bottom: 9px; width: 31px; height: 31px; border: 0; border-radius: 9px; color: #fff; background: var(--purple); font-size: 21px; }
 .mic-button.listening { background: #db5e6a; animation: pulse 1.2s infinite; font-size: 12px; }
+.mic-button:disabled { opacity: .6; cursor: wait; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 5px #db5e6a30; } }
 .instruction-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; }
 .voice-hint { color: #999cad; font-size: 10px; }
-.speech-privacy-note { margin: 7px 0 0; color: #999cad; font-size: 9px; line-height: 1.4; }
+.speech-privacy-note { margin: 6px 0 0; color: #85889c; font-size: 9px; line-height: 1.45; }
+.ai-consent { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid #e8e7f1; border-radius: 7px; color: #696c80; background: #fbfbfd; font-size: 10px; line-height: 1.5; }
+.ai-consent input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--purple); }
+.ai-consent a { color: #6254d4; font-weight: 600; }
 .language-picker { display: flex; align-items: center; gap: 5px; color: #777b91; font-size: 10px; white-space: nowrap; }
 .language-picker select { height: 28px; padding: 0 6px; border: 1px solid #e3e3ec; border-radius: 6px; color: #55576b; background: #fff; font-size: 10px; }
 .language-picker select:disabled { opacity: .65; }
