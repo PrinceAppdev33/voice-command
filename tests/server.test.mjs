@@ -13,6 +13,14 @@ async function withServer(run) {
   }
 }
 
+test("reports health without requiring Gemini", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/health`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+  });
+});
+
 test("rejects malformed or oversized-shape input before contacting Gemini", async () => {
   await withServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/understand`, {
@@ -96,7 +104,7 @@ test("returns promptly when Gemini times out", async () => {
         body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 5 PM.", language: "en-IN" }),
       });
       assert.equal(response.status, 504);
-      assert.match((await response.json()).error, /12 seconds/);
+      assert.match((await response.json()).error, /25 seconds/);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -161,6 +169,64 @@ test("transcribes and validates Gemini audio output while keeping the key server
       assert.equal(upstreamRequest.headers.get("x-goog-api-key"), "server-only-test-key");
       assert.equal(upstreamRequest.url.includes("server-only-test-key"), false);
       assert.equal(upstreamRequest.body.contents[0].parts[1].inline_data.mime_type, "audio/webm");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});
+
+test("uses the last non-thought Gemini text part as structured output", async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  process.env.GEMINI_API_KEY = "server-only-test-key";
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [
+              { thought: true, text: "Let me extract the assignee and due date from this instruction." },
+              {
+                text: JSON.stringify({
+                  transcript: "Create a task for Rahul tomorrow at 3 PM to review the report.",
+                  isTaskCommand: true,
+                  changes: {
+                    assignee: "Rahul",
+                    date: "2026-10-31",
+                    time: "15:00",
+                    subject: "review the report",
+                    reviewer: null,
+                    recurring: null,
+                    frequency: null,
+                    startTask: null,
+                  },
+                  ambiguities: [],
+                  needsClarification: false,
+                  clarificationQuestion: null,
+                }),
+              },
+            ],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/understand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 3 PM to review the report.", language: "en-IN" }),
+      });
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.task.assignee, "Rahul");
+      assert.equal(result.task.time, "15:00");
+      assert.equal(result.task.subject, "review the report");
     });
   } finally {
     globalThis.fetch = originalFetch;

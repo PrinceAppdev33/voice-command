@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
 const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
-const geminiRequestTimeoutMs = 12_000;
+const geminiRequestTimeoutMs = 25_000;
 const maxRequestBytes = 14 * 1024 * 1024;
 const maxAudioBytes = 9 * 1024 * 1024;
 const maxTranscriptLength = 3000;
@@ -232,6 +232,15 @@ function mergeTask(base, changes) {
   };
 }
 
+function geminiOutputText(payload) {
+  const parts = payload?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return undefined;
+  const texts = parts
+    .filter((part) => part && part.thought !== true && typeof part.text === "string" && part.text.trim())
+    .map((part) => part.text);
+  return texts.at(-1);
+}
+
 function validateModelResult(value, currentTaskJson) {
   if (!value || typeof value !== "object" || typeof value.transcript !== "string" || typeof value.isTaskCommand !== "boolean") {
     throw new Error("Gemini returned an invalid response. Try the instruction again.");
@@ -348,6 +357,7 @@ async function understandWithGemini(input) {
           temperature: 0.1,
           responseMimeType: "application/json",
           responseSchema,
+          thinkingConfig: { thinkingBudget: 0 },
         },
       }),
       signal: AbortSignal.timeout(geminiRequestTimeoutMs),
@@ -364,6 +374,7 @@ async function understandWithGemini(input) {
   }
 
   if (!response.ok) {
+    console.error(`Gemini request failed (HTTP ${response.status}).`);
     if (response.status === 429) {
       throw Object.assign(new Error("Gemini's free-tier request limit was reached. Wait and try again, or use typed input."), { status: 429 });
     }
@@ -382,7 +393,7 @@ async function understandWithGemini(input) {
   } catch {
     throw Object.assign(new Error("Gemini returned an unreadable response. Try again."), { status: 502 });
   }
-  const responseText = payload.candidates?.[0]?.content?.parts?.find((part) => typeof part.text === "string")?.text;
+  const responseText = geminiOutputText(payload);
   if (!responseText) {
     throw Object.assign(new Error("Gemini could not understand that input. Please try again with a clearer instruction."), { status: 502 });
   }
@@ -437,6 +448,11 @@ async function serveStatic(pathname, response) {
 export function createAppServer() {
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    if (url.pathname === "/api/health" && request.method === "GET") {
+      jsonResponse(response, 200, { ok: true });
+      return;
+    }
+
     if (url.pathname === "/api/understand") {
       if (request.method !== "POST") {
         jsonResponse(response, 405, { error: "Use POST for task understanding." });

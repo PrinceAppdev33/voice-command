@@ -41,11 +41,17 @@ export async function understandTask(request: AiUnderstandingRequest): Promise<A
     throw new Error("Could not reach the TaskPilot AI server. Make sure the app server is running.");
   }
 
+  const raw = await response.text();
   let body: unknown;
   try {
-    body = await response.json();
+    body = raw ? JSON.parse(raw) : undefined;
   } catch {
-    throw new Error("The TaskPilot AI server returned an unreadable response.");
+    const looksLikeHtml = /<!doctype html|<html[\s>]/i.test(raw);
+    throw new Error(
+      looksLikeHtml || !raw.trim()
+        ? "The API server did not return JSON. Start it with npm run dev so the web app and API run together."
+        : `The TaskPilot AI server returned an unreadable response (HTTP ${response.status}).`,
+    );
   }
 
   if (!response.ok) {

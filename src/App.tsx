@@ -228,7 +228,20 @@ export default function App() {
     setPendingVerification({ task: result.task, ambiguities: result.ambiguities });
   }
 
-  async function processWithAi(request: AiUnderstandingRequest, hasLocalFallback = false) {
+  function mergeLocalFallback(localTask: ParsedTask) {
+    setForm((current) => ({
+      assignee: current.assignee || localTask.assignee,
+      date: current.date || localTask.date,
+      time: current.time || localTask.time,
+      subject: current.subject || localTask.subject,
+      reviewer: current.reviewer || localTask.reviewer,
+      recurring: current.recurring || localTask.recurring,
+      frequency: localTask.recurring ? localTask.frequency : current.frequency,
+      startTask: current.startTask || localTask.startTask,
+    }));
+  }
+
+  async function processWithAi(request: AiUnderstandingRequest, localFallback?: ParsedTask) {
     if (processingLockRef.current) return;
     processingLockRef.current = true;
     setIsProcessing(true);
@@ -242,11 +255,12 @@ export default function App() {
       const response = await understandTask(request);
       applyAiResult(response.transcript, response);
     } catch (error) {
-      if (!hasLocalFallback) setPendingVerification(null);
+      if (localFallback) mergeLocalFallback(localFallback);
+      else setPendingVerification(null);
       const message = error instanceof Error ? error.message : "AI task understanding failed. Try again or edit the fields manually.";
       setStatus({
-        kind: hasLocalFallback ? "info" : "error",
-        message: hasLocalFallback
+        kind: localFallback ? "info" : "error",
+        message: localFallback
           ? `Gemini could not complete the request. I filled in the task details I could recognize; please review them. ${message}`
           : message,
       });
@@ -266,19 +280,13 @@ export default function App() {
       setStatus({ kind: "info", message: "Please confirm the Google Gemini data-use notice before sending this instruction." });
       return;
     }
-    // Local parser is only a quick fallback — it does NOT overwrite the form.
-    // We capture whether it found something useful for the hasLocalFallback flag,
-    // but we always send the full current form as context to Gemini.
     const localResult = parseTaskInstructions(text);
-    const hasLocalFallback = localResult.isTaskCommand;
-    // Do NOT call setForm(localResult.task) here — it would clear existing fields.
-    // Gemini will return a properly merged task instead.
     await processWithAi({
       text,
       language: recognitionLanguage,
       currentTask: form,
       clarificationContext: clarificationContext ?? undefined,
-    }, hasLocalFallback);
+    }, localResult.isTaskCommand ? localResult.task : undefined);
   }
 
   useEffect(() => {
