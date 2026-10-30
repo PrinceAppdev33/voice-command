@@ -235,6 +235,72 @@ test("uses the last non-thought Gemini text part as structured output", async ()
   }
 });
 
+test("treats spoken field statements as task updates even if Gemini marks them unrelated", async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  process.env.GEMINI_API_KEY = "server-only-test-key";
+  const currentTask = {
+    assignee: "Rahul",
+    date: "2026-10-30",
+    time: "17:00",
+    subject: "",
+    reviewer: "",
+    recurring: false,
+    frequency: "Weekly",
+    startTask: false,
+  };
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                transcript: "the subject is cs",
+                isTaskCommand: false,
+                changes: {
+                  assignee: null,
+                  date: null,
+                  time: null,
+                  subject: "cs",
+                  reviewer: null,
+                  recurring: null,
+                  frequency: null,
+                  startTask: null,
+                },
+                ambiguities: [],
+                needsClarification: false,
+                clarificationQuestion: null,
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/understand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "the subject is cs", language: "en-IN", currentTask }),
+      });
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.isTaskCommand, true);
+      assert.equal(result.task.subject, "cs");
+      assert.equal(result.task.assignee, "Rahul");
+      assert.equal(result.task.date, currentTask.date);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});
+
 test("treats casual task-option phrasing as an update and preserves existing form data", async () => {
   const previousKey = process.env.GEMINI_API_KEY;
   const originalFetch = globalThis.fetch;

@@ -48,8 +48,8 @@ export async function understandTask(request: AiUnderstandingRequest): Promise<A
   } catch {
     const looksLikeHtml = /<!doctype html|<html[\s>]/i.test(raw);
     throw new Error(
-      looksLikeHtml || !raw.trim()
-        ? "The API server did not return JSON. Start it with npm run dev so the web app and API run together."
+      response.status === 404 || looksLikeHtml || !raw.trim()
+        ? "The API server did not handle this request. Restart with npm run dev so the web app and API run together."
         : `The TaskPilot AI server returned an unreadable response (HTTP ${response.status}).`,
     );
   }

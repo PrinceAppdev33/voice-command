@@ -247,6 +247,7 @@ function isFieldUpdateCommand(text: string): boolean {
   // Match direct field-update commands that don't use a create-task verb
   return /\b(?:set|change|update|fill|put|make\s+it|assign(?:ed)?|add)\s+(?:the\s+)?(?:date|time|subject|assignee|reviewer|recurrence|frequency)\b/i.test(text)
     || /\b(?:set\s+the|change\s+the|update\s+the|fill\s+the)\b/i.test(text)
+    || /\b(?:the\s+)?(?:subject|title|task name|date|time|assignee|reviewer|frequency)\s*(?:is|:)\s+\S/i.test(text)
     || /\b(?:make\s+it\s+(?:repeat|recurring|weekly|daily|monthly))\b/i.test(text)
     || /\b(?:actually|no,?\s+(?:assign|change|make|set)|instead)\b/i.test(text)
     || /\b(?:add\s+\w+\s+as\s+reviewer|assign\s+(?:this|it)\s+to)\b/i.test(text)

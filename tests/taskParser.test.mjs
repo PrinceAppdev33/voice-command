@@ -45,6 +45,12 @@ test("understands different command phrasing and recognizes task intent without 
   assert.equal(second.isTaskCommand, true);
 });
 
+test("treats spoken field statements such as the subject is cs as updates", () => {
+  const result = parseTaskInstructions("the subject is cs", now);
+  assert.equal(result.isTaskCommand, true);
+  assert.equal(result.task.subject, "cs");
+});
+
 test("rejects irrelevant speech without producing task data", () => {
   const result = parseTaskInstructions("What is the weather today?", now);
   assert.equal(result.isTaskCommand, false);

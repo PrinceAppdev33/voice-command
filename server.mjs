@@ -179,7 +179,8 @@ function buildPrompt(input) {
     "  • A fresh task-creation request: 'Create a task for Rahul', 'Schedule a meeting…'",
     "  • A partial field update (no create-verb needed): 'Set the date to tomorrow', 'Make it 5 PM',",
     "    'Fill the date tomorrow', 'Change the assignee to Aman', 'Add Priya as reviewer',",
-    "    'Make it repeat weekly', 'Assign this to Rahul', 'Set the subject to review the UI'",
+    "    'Make it repeat weekly', 'Assign this to Rahul', 'Set the subject to review the UI',",
+    "    'the subject is CS', 'subject is cs', 'the date is tomorrow', 'time is 5 PM'",
     "  • A correction: 'Actually make it Friday', 'No, assign it to Aman instead'",
     "  • A clarification answer when a question was previously asked",
     "Set isTaskCommand=false only for clearly unrelated conversation (jokes, weather questions, etc.).",
@@ -309,6 +310,11 @@ function validateModelResult(value, currentTaskJson) {
   };
 }
 
+function hasExplicitChanges(changes) {
+  if (!changes || typeof changes !== "object") return false;
+  return Object.values(changes).some((value) => value !== null && value !== undefined && value !== "");
+}
+
 function isExplicitTaskFieldUpdate(text) {
   // Detect explicit field names or field-adjacent words
   const mentionsField = /\b(?:assignee|assigned\s+to|assign(?:ed)?|reviewer|subject|title|task\s*(?:name|date|time)|due\s+date|date|time|recur\w*|repeat\w*|daily|weekly|monthly|frequency|every\s+(?:day|week|month)s?|start\s+task)\b/i.test(text);
@@ -316,7 +322,8 @@ function isExplicitTaskFieldUpdate(text) {
   const expressesChange = /\b(?:set|change|update|make|fill|add|put|assign|enable|disable|turn|switch|start|stop|on|off|want|need|keep|options?)\b|\b(?:would|i[‘’']d)\s+like\b/i.test(text);
   // Detect partial-command shorthand that doesn't need create-verb
   const hasPartialPattern = /\b(?:fill\s+(?:the\s+)?(?:date|time|subject|assignee|reviewer)|make\s+it\s+(?:\d|[a-z]+\s*(?:am|pm))|(?:no,?\s*(?:assign|change|make|set))|actually\b|instead\b)/i.test(text);
-  return (mentionsField && expressesChange) || hasPartialPattern;
+  const statesFieldValue = /\b(?:the\s+)?(?:subject|title|task name|date|time|assignee|assigned to|reviewer|frequency)\s*(?:is|:)\s+\S/i.test(text);
+  return (mentionsField && expressesChange) || hasPartialPattern || statesFieldValue;
 }
 
 async function understandWithGemini(input) {
@@ -357,7 +364,7 @@ async function understandWithGemini(input) {
           temperature: 0.1,
           responseMimeType: "application/json",
           responseSchema,
-          thinkingConfig: { thinkingBudget: 0 },
+          thinkingConfig: { thinkingLevel: "minimal" },
         },
       }),
       signal: AbortSignal.timeout(geminiRequestTimeoutMs),
@@ -402,7 +409,7 @@ async function understandWithGemini(input) {
     if (input.text) result.transcript = input.text;
     const instructionText = input.text || result.transcript;
     // Broaden isTaskCommand: any explicit field update counts even without create-verb
-    if (isExplicitTaskFieldUpdate(instructionText)) result.isTaskCommand = true;
+    if (isExplicitTaskFieldUpdate(instructionText) || hasExplicitChanges(result.changes)) result.isTaskCommand = true;
     // Clarification answers always count as task commands
     if (input.clarificationContext && instructionText
       && !/\b(?:tell me a joke|what(?:'s| is) the weather|what time is it)\b/i.test(instructionText)) {
@@ -448,12 +455,13 @@ async function serveStatic(pathname, response) {
 export function createAppServer() {
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-    if (url.pathname === "/api/health" && request.method === "GET") {
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    if (pathname === "/api/health" && request.method === "GET") {
       jsonResponse(response, 200, { ok: true });
       return;
     }
 
-    if (url.pathname === "/api/understand") {
+    if (pathname === "/api/understand") {
       if (request.method !== "POST") {
         jsonResponse(response, 405, { error: "Use POST for task understanding." });
         return;
@@ -473,7 +481,7 @@ export function createAppServer() {
       return;
     }
 
-    if (url.pathname.startsWith("/api/")) {
+    if (pathname.startsWith("/api/")) {
       jsonResponse(response, 404, { error: "API endpoint not found." });
       return;
     }
