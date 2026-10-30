@@ -311,9 +311,11 @@ export default function App() {
     const result = verifyTaskForm(formRef.current, task);
     setFieldErrors(result.failedFields);
     setClarificationContext(null);
-    setStatus(result.verified
-      ? { kind: "success", message: "Task details populated and verified. Please review and submit manually." }
-      : { kind: "error", message: `Form verification failed for: ${result.failedFields.join(", ")}. Correct the fields before proceeding.` });
+    if (result.verified) {
+      addTask(task);
+      return;
+    }
+    setStatus({ kind: "error", message: `Form verification failed for: ${result.failedFields.join(", ")}. Correct the fields before proceeding.` });
     setPendingVerification(null);
   }, [form, pendingVerification]);
 
@@ -508,9 +510,9 @@ export default function App() {
     setStatus({ kind: "info", message: "Task details edited. Review the current values before submitting manually." });
   }
 
-  function submitTaskManually() {
+  function addTask(task: ParsedTask) {
     if (submitLockRef.current) return;
-    const invalid = validateTaskForExecution(form);
+    const invalid = validateTaskForExecution(task);
     if (invalid.length) {
       setFieldErrors(invalid);
       setStatus({ kind: "error", message: `Complete the task details before submitting: ${invalid.join(", ")}.` });
@@ -518,14 +520,18 @@ export default function App() {
     }
 
     submitLockRef.current = true;
-    setTasks((current) => [{ ...form, subject: form.subject.trim(), id: Date.now() }, ...current]);
+    setTasks((current) => [{ ...task, subject: task.subject.trim(), id: Date.now() }, ...current]);
     setInstructions("");
     setForm(emptyTask());
     setFieldErrors([]);
     setPendingVerification(null);
     setClarificationContext(null);
     setIsOpen(false);
-    setStatus({ kind: "success", message: "Task submitted manually and added to this session's task list." });
+    setStatus({ kind: "success", message: "Task verified and added to this session's task list." });
+  }
+
+  function submitTaskManually() {
+    addTask(form);
   }
 
   function formatDate(value: string) {
@@ -564,7 +570,7 @@ export default function App() {
 
       <section className="tasks-section">
         <div className="section-heading">
-          <div><h2>Your tasks <span className="task-count">{tasks.length}</span></h2><p>Commands fill the form; you choose when to submit.</p></div>
+          <div><h2>Your tasks <span className="task-count">{tasks.length}</span></h2><p>Complete tasks are added after Gemini verifies the details.</p></div>
           <button className="primary-button" type="button" onClick={openComposer}><span className="plus">+</span> Create task</button>
         </div>
         {status && !isOpen && <div className={`status-banner ${status.kind}`} role="status">{status.message}</div>}
@@ -583,15 +589,15 @@ export default function App() {
             ))}
           </div>
         ) : (
-          <div className="empty-state"><div className="empty-icon">✳</div><h3>Ready when you are</h3><p>Open the task form, describe a task, then review the verified fields before submitting manually.</p><button className="text-button" type="button" onClick={openComposer}>Try a voice or text command <span>→</span></button></div>
+          <div className="empty-state"><div className="empty-icon">✳</div><h3>Ready when you are</h3><p>Describe a task and Gemini will verify the details before adding it to your list.</p><button className="text-button" type="button" onClick={openComposer}>Try a voice or text command <span>→</span></button></div>
         )}
-        <p className="privacy-note"><span>✦</span> Gemini AI understands voice and text commands; task submission always requires your click.</p>
+        <p className="privacy-note"><span>✦</span> Complete, verified tasks are added after you confirm the Gemini data-use notice.</p>
       </section>
 
       {isOpen && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeComposer(); }}>
           <section className="composer" role="dialog" aria-modal="true" aria-labelledby="composer-title">
-            <header className="composer-header"><div><span className="composer-icon">✦</span><div><h2 id="composer-title">Task details</h2><p>Say it or type it — we’ll fill in the form for review.</p></div></div><button className="close-button" type="button" aria-label="Close" onClick={closeComposer}>×</button></header>
+            <header className="composer-header"><div><span className="composer-icon">✦</span><div><h2 id="composer-title">Task details</h2><p>Say it or type it — Gemini will fill and verify the form.</p></div></div><button className="close-button" type="button" aria-label="Close" onClick={closeComposer}>×</button></header>
             <div className="composer-body">
               <label className="instruction-label" htmlFor="instructions">Your instruction</label>
               <div className="instruction-box"><textarea id="instructions" value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="e.g. Create a task for Rahul tomorrow at 3 PM. The subject is Review the project…" rows={3} /><button className={`mic-button ${isRecording ? "listening" : ""}`} type="button" aria-label={isRecording ? "Stop recording" : "Record voice instruction"} onClick={() => void toggleRecording()} disabled={isProcessing}><span>{isRecording ? "■" : "⌁"}</span></button></div>
@@ -625,7 +631,7 @@ export default function App() {
                 <div className="field start-control"><label htmlFor="start-task">Start task now</label><button id="start-task" type="button" role="switch" aria-checked={form.startTask} className={`toggle ${form.startTask ? "on" : ""}`} onClick={() => updateForm("startTask", !form.startTask)}><span /></button></div>
               </div>
             </div>
-            <footer className="composer-footer"><span>Submission requires your explicit action</span><div><button type="button" className="cancel-button" onClick={closeComposer}>Close</button><button type="button" className="primary-button" onClick={submitTaskManually}>Create task <span>→</span></button></div></footer>
+            <footer className="composer-footer"><span>Complete tasks are added after verification</span><div><button type="button" className="cancel-button" onClick={closeComposer}>Close</button><button type="button" className="primary-button" onClick={submitTaskManually}>Create task <span>→</span></button></div></footer>
           </section>
         </div>
       )}

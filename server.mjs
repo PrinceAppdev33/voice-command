@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
 const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
-const geminiRequestTimeoutMs = 25_000;
+const geminiRequestTimeoutMs = 60_000;
 const maxRequestBytes = 14 * 1024 * 1024;
 const maxAudioBytes = 9 * 1024 * 1024;
 const maxTranscriptLength = 3000;
@@ -382,16 +382,33 @@ async function understandWithGemini(input) {
 
   if (!response.ok) {
     console.error(`Gemini request failed (HTTP ${response.status}).`);
+    let upstreamMessage = "";
+    try {
+      const errorPayload = await response.json();
+      if (typeof errorPayload?.error?.message === "string") {
+        upstreamMessage = errorPayload.error.message
+          .replaceAll(apiKey, "[redacted]")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+      }
+    } catch {
+      // Some upstream failures do not include a JSON error body.
+    }
+    const detail = upstreamMessage ? ` Google: ${upstreamMessage}` : "";
     if (response.status === 429) {
-      throw Object.assign(new Error("Gemini's free-tier request limit was reached. Wait and try again, or use typed input."), { status: 429 });
+      throw Object.assign(new Error(`Gemini's quota or request limit was reached.${detail} Check your Google AI Studio usage and try again.`), { status: 429 });
+    }
+    if (response.status === 400 && /api.?key|credential/i.test(upstreamMessage)) {
+      throw Object.assign(new Error(`Gemini rejected the API key.${detail} Check GEMINI_API_KEY in .env and restart the app.`), { status: 502 });
     }
     if (response.status === 400 || response.status === 404) {
-      throw Object.assign(new Error("Gemini rejected the request. Check that the selected model is available for your API key."), { status: 502 });
+      throw Object.assign(new Error(`Gemini rejected the model "${model}" or request format (HTTP ${response.status}). Check that the model supports structured output and is available to your API key.${detail}`), { status: 502 });
     }
     if (response.status === 401 || response.status === 403) {
-      throw Object.assign(new Error("Gemini authentication failed. Check GEMINI_API_KEY and its API access."), { status: 502 });
+      throw Object.assign(new Error(`Gemini authentication or access failed (HTTP ${response.status}). Check GEMINI_API_KEY and its API access.${detail}`), { status: 502 });
     }
-    throw Object.assign(new Error(`Gemini request failed (HTTP ${response.status}). Try again later.`), { status: 502 });
+    throw Object.assign(new Error(`Gemini request failed (HTTP ${response.status}). Try again later.${detail}`), { status: 502 });
   }
 
   let payload;

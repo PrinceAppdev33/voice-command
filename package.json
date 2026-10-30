@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web \"node --env-file-if-exists=.env server.mjs\" \"vite\"",
+    "dev": "concurrently -k -n api,web \"node --watch --env-file-if-exists=.env server.mjs\" \"vite\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "start": "node --env-file-if-exists=.env server.mjs",

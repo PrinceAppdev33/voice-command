@@ -104,10 +104,82 @@ test("returns promptly when Gemini times out", async () => {
         body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 5 PM.", language: "en-IN" }),
       });
       assert.equal(response.status, 504);
-      assert.match((await response.json()).error, /25 seconds/);
+      assert.match((await response.json()).error, /60 seconds/);
     });
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});
+
+test("explains Gemini API-key errors without exposing the key", async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  const apiKey = "server-only-test-key";
+  process.env.GEMINI_API_KEY = apiKey;
+  console.error = () => {};
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        error: { code: 400, message: `API key ${apiKey} is not valid.`, status: "INVALID_ARGUMENT" },
+      }), { status: 400, headers: { "Content-Type": "application/json" } });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/understand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 5 PM.", language: "en-IN" }),
+      });
+      assert.equal(response.status, 502);
+      const { error } = await response.json();
+      assert.match(error, /Gemini rejected the API key/);
+      assert.match(error, /\[redacted\]/);
+      assert.equal(error.includes(apiKey), false);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalConsoleError;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});
+
+test("includes Google's model error when a configured model is unavailable", async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  process.env.GEMINI_API_KEY = "server-only-test-key";
+  console.error = () => {};
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        error: { code: 404, message: "models/example was not found.", status: "NOT_FOUND" },
+      }), { status: 404, headers: { "Content-Type": "application/json" } });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/understand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 5 PM.", language: "en-IN" }),
+      });
+      assert.equal(response.status, 502);
+      const { error } = await response.json();
+      assert.match(error, /model ".+"/);
+      assert.match(error, /models\/example was not found/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalConsoleError;
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = previousKey;
   }
