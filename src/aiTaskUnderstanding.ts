@@ -49,7 +49,7 @@ export async function understandTask(request: AiUnderstandingRequest): Promise<A
     const looksLikeHtml = /<!doctype html|<html[\s>]/i.test(raw);
     throw new Error(
       response.status === 404 || looksLikeHtml || !raw.trim()
-        ? "The API server did not handle this request. Restart with npm run dev so the web app and API run together."
+        ? `Received a web page instead of the TaskPilot API response from ${new URL(response.url).origin}/api/understand. This usually means an old or duplicate dev server is serving the page; stop it and restart with npm run dev.`
         : `The TaskPilot AI server returned an unreadable response (HTTP ${response.status}).`,
     );
   }

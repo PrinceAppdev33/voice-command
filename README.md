@@ -11,6 +11,8 @@ TaskPilot uses browser speech recognition for live voice transcription where sup
 
 If the key is not configured, the server returns a clear setup error; it never falls back silently to the local parser. Gemini requests can take up to 60 seconds, and API errors include a safe, shortened explanation from Google when available, without exposing the API key. The API server also enforces request-size limits, a per-IP rate limit, and schema validation. Free-tier model access and quotas can change and are controlled by Google.
 
+If the page says it received a web page instead of an API response, stop any older `npm run dev` processes and restart `npm run dev`. The web app uses port 5173 and the API uses port 3001; startup now fails clearly if the web port is already occupied instead of silently choosing a different port.
+
 ## Production
 
 Run `npm run build`, then set the server environment variables (`GEMINI_API_KEY`, and optionally `PORT` and `HOST`) and run `npm run start`. The Node server serves the built frontend and the `/api/understand` endpoint from the same origin. On a hosting platform that requires a public bind address, set `HOST=0.0.0.0`.
