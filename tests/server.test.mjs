@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
+import { createServer as createNodeServer } from "node:http";
 import test from "node:test";
 import { createAppServer } from "../server.mjs";
+import understand from "../api/understand.mjs";
 
 async function withServer(run) {
   const server = createAppServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+async function withVercelFunction(run) {
+  const server = createNodeServer(understand);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   try {
@@ -19,6 +32,64 @@ test("reports health without requiring Gemini", async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true });
   });
+});
+
+test("Vercel function understands typed task instructions and returns JSON", async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  process.env.GEMINI_API_KEY = "server-only-test-key";
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                transcript: "Create a task for Rahul tomorrow at 3 PM to review the report.",
+                isTaskCommand: true,
+                changes: {
+                  assignee: "Rahul",
+                  date: "2026-10-31",
+                  time: "15:00",
+                  subject: "review the report",
+                  reviewer: null,
+                  recurring: null,
+                  frequency: null,
+                  startTask: null,
+                },
+                ambiguities: [],
+                needsClarification: false,
+                clarificationQuestion: null,
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    await withVercelFunction(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/understand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "Create a task for Rahul tomorrow at 3 PM to review the report.", language: "en-IN" }),
+      });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type"), /application\/json/);
+      const result = await response.json();
+      assert.equal(result.isTaskCommand, true);
+      assert.equal(result.transcript, "Create a task for Rahul tomorrow at 3 PM to review the report.");
+      assert.equal(result.task.assignee, "Rahul");
+      assert.equal(result.task.time, "15:00");
+      assert.equal(result.task.subject, "review the report");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
 });
 
 test("rejects malformed or oversized-shape input before contacting Gemini", async () => {

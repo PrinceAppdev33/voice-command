@@ -95,6 +95,25 @@ function checkRateLimit(request) {
   return usage.count <= 30;
 }
 
+export async function handleUnderstandRequest(request, response) {
+  if (request.method !== "POST") {
+    jsonResponse(response, 405, { error: "Use POST for task understanding." });
+    return;
+  }
+  if (!checkRateLimit(request)) {
+    jsonResponse(response, 429, { error: "Too many requests. Wait a minute before trying again." });
+    return;
+  }
+  try {
+    const input = validateRequest(await readJsonBody(request));
+    jsonResponse(response, 200, await understandWithGemini(input));
+  } catch (error) {
+    jsonResponse(response, error?.status ?? 500, {
+      error: error instanceof Error ? error.message : "Task understanding failed. Try again.",
+    });
+  }
+}
+
 function validateRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw Object.assign(new Error("Request body must be an object."), { status: 400 });
@@ -479,22 +498,7 @@ export function createAppServer() {
     }
 
     if (pathname === "/api/understand") {
-      if (request.method !== "POST") {
-        jsonResponse(response, 405, { error: "Use POST for task understanding." });
-        return;
-      }
-      if (!checkRateLimit(request)) {
-        jsonResponse(response, 429, { error: "Too many requests. Wait a minute before trying again." });
-        return;
-      }
-      try {
-        const input = validateRequest(await readJsonBody(request));
-        jsonResponse(response, 200, await understandWithGemini(input));
-      } catch (error) {
-        jsonResponse(response, error?.status ?? 500, {
-          error: error instanceof Error ? error.message : "Task understanding failed. Try again.",
-        });
-      }
+      await handleUnderstandRequest(request, response);
       return;
     }
 
