@@ -312,7 +312,8 @@ export default function App() {
     setFieldErrors(result.failedFields);
     setClarificationContext(null);
     if (result.verified) {
-      addTask(task);
+      setPendingVerification(null);
+      setStatus({ kind: "success", message: "Task details verified. Review them, then press Create task when you're ready." });
       return;
     }
     setStatus({ kind: "error", message: `Form verification failed for: ${result.failedFields.join(", ")}. Correct the fields before proceeding.` });
@@ -631,7 +632,7 @@ export default function App() {
                 <div className="field start-control"><label htmlFor="start-task">Start task now</label><button id="start-task" type="button" role="switch" aria-checked={form.startTask} className={`toggle ${form.startTask ? "on" : ""}`} onClick={() => updateForm("startTask", !form.startTask)}><span /></button></div>
               </div>
             </div>
-            <footer className="composer-footer"><span>Complete tasks are added after verification</span><div><button type="button" className="cancel-button" onClick={closeComposer}>Close</button><button type="button" className="primary-button" onClick={submitTaskManually}>Create task <span>→</span></button></div></footer>
+            <footer className="composer-footer"><span>Review the verified details, then create the task when ready</span><div><button type="button" className="cancel-button" onClick={closeComposer}>Close</button><button type="button" className="primary-button" onClick={submitTaskManually}>Create task <span>→</span></button></div></footer>
           </section>
         </div>
       )}
